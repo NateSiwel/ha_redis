@@ -360,6 +360,9 @@ class RedisClient:
         Provides comprehensive information about the master, replicas,
         and Sentinel cluster health. Useful for monitoring and debugging.
         
+        This method is optimized to query a single Sentinel for all topology
+        information, minimizing network round-trips.
+        
         Returns:
             SentinelTopology object with current state, or None if not
             in Sentinel mode or query fails.
@@ -368,34 +371,7 @@ class RedisClient:
             self.logger.warning("get_topology() called but not in Sentinel mode")
             return None
         
-        try:
-            master_addr = await self.discover_master()
-            replica_addrs = await self.discover_replicas()
-            
-            # Query sentinel for additional topology info
-            sentinel_info = await self._query_sentinel_info()
-            
-            return SentinelTopology(
-                master_name=self.config.sentinel_master_name,
-                master_address=master_addr,
-                replica_addresses=replica_addrs,
-                sentinel_count=sentinel_info.get("sentinel_count", 0),
-                is_healthy=sentinel_info.get("is_healthy", False),
-                quorum=sentinel_info.get("quorum", 2),
-            )
-        except (ConnectionError, TimeoutError, RedisError) as e:
-            self.logger.error(f"Failed to get topology: {type(e).__name__}: {e}")
-            return None
-    
-    async def _query_sentinel_info(self) -> dict:
-        """
-        Query Sentinel for master health and cluster information.
-        
-        Returns:
-            Dictionary with sentinel_count, is_healthy, and quorum values
-        """
-        result = {"sentinel_count": 0, "is_healthy": False, "quorum": 2}
-        
+        # Try each Sentinel until one responds successfully
         for host, port in self.config.sentinel_hosts:
             try:
                 sentinel_conn = redis.Redis(
@@ -407,30 +383,74 @@ class RedisClient:
                 )
                 
                 try:
+                    # Query master info (includes address, flags, quorum, sentinel count)
                     master_info = await sentinel_conn.execute_command(
                         "SENTINEL", "MASTER", self.config.sentinel_master_name
                     )
                     
+                    # Query replicas in the same connection
+                    replicas_info = await sentinel_conn.execute_command(
+                        "SENTINEL", "REPLICAS", self.config.sentinel_master_name
+                    )
+                    
+                    # Parse master info
+                    master_addr = None
+                    is_healthy = False
+                    quorum = 2
+                    sentinel_count = 0
+                    
                     if isinstance(master_info, list):
                         info_dict = dict(zip(master_info[::2], master_info[1::2]))
                         
+                        # Extract master address
+                        master_host = info_dict.get("ip")
+                        master_port = info_dict.get("port")
+                        if master_host and master_port:
+                            master_addr = (master_host, int(master_port))
+                        
+                        # Extract health and cluster info
                         flags = info_dict.get("flags", "")
-                        result["is_healthy"] = (
+                        is_healthy = (
                             "master" in flags and 
                             "s_down" not in flags and 
                             "o_down" not in flags
                         )
-                        result["quorum"] = int(info_dict.get("quorum", 2))
-                        result["sentinel_count"] = int(info_dict.get("num-other-sentinels", 0)) + 1
+                        quorum = int(info_dict.get("quorum", 2))
+                        sentinel_count = int(info_dict.get("num-other-sentinels", 0)) + 1
                     
-                    return result
+                    # Parse replica addresses
+                    replica_addrs = []
+                    if isinstance(replicas_info, list):
+                        for replica in replicas_info:
+                            if isinstance(replica, list):
+                                replica_dict = dict(zip(replica[::2], replica[1::2]))
+                                replica_host = replica_dict.get("ip")
+                                replica_port = replica_dict.get("port")
+                                if replica_host and replica_port:
+                                    replica_addrs.append((replica_host, int(replica_port)))
+                    
+                    return SentinelTopology(
+                        master_name=self.config.sentinel_master_name,
+                        master_address=master_addr,
+                        replica_addresses=replica_addrs,
+                        sentinel_count=sentinel_count,
+                        is_healthy=is_healthy,
+                        quorum=quorum,
+                    )
                 finally:
                     await sentinel_conn.close()
                     
-            except (ConnectionError, TimeoutError):
+            except (ConnectionError, TimeoutError) as e:
+                self.logger.warning(
+                    f"Failed to query Sentinel {host}:{port}: {type(e).__name__}: {e}"
+                )
                 continue
+            except RedisError as e:
+                self.logger.error(f"Failed to get topology: {type(e).__name__}: {e}")
+                return None
         
-        return result
+        self.logger.error("Failed to get topology: all Sentinels unreachable")
+        return None
     
     async def get_replica_client(self) -> Optional[redis.Redis]:
         """
