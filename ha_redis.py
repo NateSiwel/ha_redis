@@ -144,6 +144,7 @@ class RedisClient:
         
         self._pool: Optional[redis.ConnectionPool] = None
         self._client: Optional[redis.Redis] = None
+        self._replica_client: Optional[redis.Redis] = None
         self._sentinel: Optional[Sentinel] = None
         self._initialized = False
     
@@ -269,6 +270,10 @@ class RedisClient:
         if self._client is not None:
             await self._client.close()
             self._client = None
+        
+        if self._replica_client is not None:
+            await self._replica_client.close()
+            self._replica_client = None
         
         if self._pool is not None:
             await self._pool.disconnect()
@@ -459,6 +464,9 @@ class RedisClient:
         Use this for read-scaling by offloading reads to replicas.
         The returned client should only be used for read operations.
         
+        The client is cached and reused across calls. Call close() to
+        release the connection pool when done.
+        
         Returns:
             Redis client connected to a replica, or None if not in
             Sentinel mode or no replicas available.
@@ -467,12 +475,15 @@ class RedisClient:
             self.logger.warning("get_replica_client() called but not in Sentinel mode")
             return None
         
+        if self._replica_client is not None:
+            return self._replica_client
+        
         try:
             sentinel = self.get_sentinel()
-            replica_client = sentinel.slave_for(
+            self._replica_client = sentinel.slave_for(
                 self.config.sentinel_master_name
             )
-            return replica_client
+            return self._replica_client
         except (ConnectionError, TimeoutError, RedisError) as e:
             self.logger.error(f"Failed to get replica client: {type(e).__name__}: {e}")
             return None
