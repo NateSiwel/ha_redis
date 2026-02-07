@@ -193,6 +193,7 @@ class RedisClient:
             retry_on_timeout=True,
             max_connections=self.config.max_connections,
             password=self.config.password,
+            ssl=self.config.ssl,
         )
         
         self.logger.info(
@@ -224,7 +225,9 @@ class RedisClient:
                 self._sentinel = self._create_sentinel()
             
             self._client = self._sentinel.master_for(
-                self.config.sentinel_master_name
+                self.config.sentinel_master_name,
+                db=self.config.db,
+                ssl=self.config.ssl,
             )
             self.logger.info(
                 f"Connected to Sentinel master: {self.config.sentinel_master_name}"
@@ -488,7 +491,9 @@ class RedisClient:
         try:
             sentinel = self.get_sentinel()
             self._replica_client = sentinel.slave_for(
-                self.config.sentinel_master_name
+                self.config.sentinel_master_name,
+                db=self.config.db,
+                ssl=self.config.ssl,
             )
             return self._replica_client
         except (ConnectionError, TimeoutError, RedisError) as e:

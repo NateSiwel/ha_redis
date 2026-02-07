@@ -164,7 +164,11 @@ class TestRedisClientSentinelMode:
         
         client = sentinel_client.get_client()
         
-        mock_sentinel.master_for.assert_called_once_with("mymaster")
+        mock_sentinel.master_for.assert_called_once_with(
+            "mymaster",
+            db=0,
+            ssl=False,
+        )
         assert client is mock_master
     
     @patch('ha_redis.Sentinel')
