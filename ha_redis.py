@@ -14,9 +14,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Callable, Any
 from functools import wraps
 import redis.asyncio as redis
-from redis.asyncio.retry import Retry
 from redis.asyncio.sentinel import Sentinel
-from redis.backoff import ExponentialBackoff
 from redis.exceptions import (
     ConnectionError,
     TimeoutError,
@@ -148,16 +146,13 @@ class RedisClient:
         self._sentinel: Optional[Sentinel] = None
         self._initialized = False
     
-    def _create_retry(self) -> Retry:
-        """Create retry configuration with exponential backoff."""
-        return Retry(
-            ExponentialBackoff(cap=2, base=self.config.retry_base_delay),
-            retries=self.config.retry_attempts
-        )
-    
     def _create_pool(self) -> redis.ConnectionPool:
         """
         Create a connection pool with production-ready settings.
+        
+        Note: Internal command retries are disabled to avoid multiplicative
+        retry behavior when combined with the with_retry decorator.
+        Use with_retry for application-level retry logic.
         
         Returns:
             Configured Redis connection pool
@@ -169,7 +164,6 @@ class RedisClient:
             socket_timeout=self.config.socket_timeout,
             socket_connect_timeout=self.config.socket_connect_timeout,
             retry_on_timeout=True,
-            retry=self._create_retry(),
             health_check_interval=self.config.health_check_interval,
         )
         
@@ -184,6 +178,10 @@ class RedisClient:
         """
         Create a Sentinel instance for HA mode.
         
+        Note: Internal command retries are disabled to avoid multiplicative
+        retry behavior when combined with the with_retry decorator.
+        Use with_retry for application-level retry logic.
+        
         Returns:
             Configured Sentinel instance
         """
@@ -193,7 +191,6 @@ class RedisClient:
             socket_timeout=1.0,
             socket_connect_timeout=1.0,
             retry_on_timeout=True,
-            retry=self._create_retry(),
             max_connections=self.config.max_connections,
             password=self.config.password,
         )
@@ -514,7 +511,12 @@ class RedisClient:
         """
         Decorator for adding retry logic to Redis operations.
         
-        Use this for critical operations that must succeed.
+        Use this for high-level business logic that spans multiple Redis
+        operations or requires application-level retry guarantees.
+        
+        Note: This decorator provides the sole layer of retry logic.
+        Internal redis-py retries are disabled to avoid multiplicative
+        retry behavior.
         
         Args:
             max_retries: Maximum number of retry attempts (defaults to config)
@@ -564,7 +566,10 @@ def with_redis_retry(max_retries: int = 3, base_delay: float = 0.1) -> Callable:
     """
     Standalone decorator for adding retry logic to Redis operations.
     
-    Use this when you don't have access to a RedisClient instance.
+    Use this for high-level business logic that spans multiple Redis
+    operations or requires application-level retry guarantees.
+    
+    Note: This decorator provides the sole layer of retry logic.
     
     Args:
         max_retries: Maximum number of retry attempts
