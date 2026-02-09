@@ -19,7 +19,15 @@ from redis.exceptions import (
     ConnectionError,
     TimeoutError,
     BusyLoadingError,
+    ReadOnlyError,
     RedisError
+)
+
+RETRYABLE_EXCEPTIONS = (
+    ConnectionError,
+    TimeoutError,
+    ReadOnlyError,
+    BusyLoadingError,
 )
 
 
@@ -84,6 +92,9 @@ class RedisConfig:
     ssl: bool = False
     retry_attempts: int = 3
     retry_base_delay: float = 0.1
+    # Sentinel discovery protocol timeouts (intentionally short)
+    sentinel_socket_timeout: float = 1.0
+    sentinel_socket_connect_timeout: float = 1.0
 
     @property
     def url(self) -> str:
@@ -163,7 +174,7 @@ class RedisClient:
             max_connections=self.config.max_connections,
             socket_timeout=self.config.socket_timeout,
             socket_connect_timeout=self.config.socket_connect_timeout,
-            retry_on_timeout=True,
+            retry_on_timeout=False,
             health_check_interval=self.config.health_check_interval,
         )
         
@@ -188,10 +199,9 @@ class RedisClient:
         sentinel = Sentinel(
             self.config.sentinel_hosts,
             decode_responses=True,
-            socket_timeout=1.0,
-            socket_connect_timeout=1.0,
-            retry_on_timeout=True,
-            max_connections=self.config.max_connections,
+            socket_timeout=self.config.sentinel_socket_timeout,
+            socket_connect_timeout=self.config.sentinel_socket_connect_timeout,
+            retry_on_timeout=False,
             password=self.config.password,
             ssl=self.config.ssl,
         )
@@ -228,6 +238,11 @@ class RedisClient:
                 self.config.sentinel_master_name,
                 db=self.config.db,
                 ssl=self.config.ssl,
+                password=self.config.password,
+                socket_timeout=self.config.socket_timeout,
+                socket_connect_timeout=self.config.socket_connect_timeout,
+                max_connections=self.config.max_connections,
+                health_check_interval=self.config.health_check_interval,
             )
             self.logger.info(
                 f"Connected to Sentinel master: {self.config.sentinel_master_name}"
@@ -494,6 +509,11 @@ class RedisClient:
                 self.config.sentinel_master_name,
                 db=self.config.db,
                 ssl=self.config.ssl,
+                password=self.config.password,
+                socket_timeout=self.config.socket_timeout,
+                socket_connect_timeout=self.config.socket_connect_timeout,
+                max_connections=self.config.max_connections,
+                health_check_interval=self.config.health_check_interval,
             )
             return self._replica_client
         except (ConnectionError, TimeoutError, RedisError) as e:
@@ -547,7 +567,7 @@ class RedisClient:
                 for attempt in range(retries + 1):
                     try:
                         return await func(*args, **kwargs)
-                    except (ConnectionError, TimeoutError) as e:
+                    except RETRYABLE_EXCEPTIONS as e:
                         last_error = e
                         if attempt < retries:
                             sleep_time = delay * (2 ** attempt)
@@ -598,7 +618,7 @@ def with_redis_retry(max_retries: int = 3, base_delay: float = 0.1) -> Callable:
             for attempt in range(max_retries + 1):
                 try:
                     return await func(*args, **kwargs)
-                except (ConnectionError, TimeoutError) as e:
+                except RETRYABLE_EXCEPTIONS as e:
                     last_error = e
                     if attempt < max_retries:
                         delay = base_delay * (2 ** attempt)

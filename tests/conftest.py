@@ -285,6 +285,13 @@ def busy_loading_error():
 
 
 @pytest.fixture
+def readonly_error():
+    """Create a Redis ReadOnlyError."""
+    from redis.exceptions import ReadOnlyError
+    return ReadOnlyError("READONLY You can't write against a read only replica.")
+
+
+@pytest.fixture
 def redis_error():
     """Create a general RedisError."""
     from redis.exceptions import RedisError

@@ -12,7 +12,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 
-from redis.exceptions import ConnectionError, TimeoutError
+from redis.exceptions import ConnectionError, TimeoutError, ReadOnlyError, BusyLoadingError
 
 from ha_redis import RedisClient, RedisConfig, with_redis_retry
 
@@ -137,6 +137,40 @@ class TestWithRetryDecorator:
         assert received_kwargs == {"key1": "val1", "key2": "val2"}
     
     @pytest.mark.asyncio
+    async def test_retry_on_readonly_error(self, mocked_redis_client):
+        """Should retry on ReadOnlyError (failover scenario)."""
+        call_count = 0
+
+        @mocked_redis_client.with_retry(max_retries=2, base_delay=0.01)
+        async def operation():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise ReadOnlyError("READONLY You can't write against a read only replica.")
+            return "success"
+
+        result = await operation()
+        assert result == "success"
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_on_busy_loading_error(self, mocked_redis_client):
+        """Should retry on BusyLoadingError."""
+        call_count = 0
+
+        @mocked_redis_client.with_retry(max_retries=2, base_delay=0.01)
+        async def operation():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise BusyLoadingError("Redis is loading the dataset in memory")
+            return "success"
+
+        result = await operation()
+        assert result == "success"
+        assert call_count == 2
+
+    @pytest.mark.asyncio
     async def test_non_retryable_exception_propagates(self, mocked_redis_client):
         """Non-retryable exceptions should propagate immediately."""
         call_count = 0
@@ -225,6 +259,40 @@ class TestWithRedisRetryStandalone:
         
         assert call_count == 3
     
+    @pytest.mark.asyncio
+    async def test_retry_on_readonly_error(self):
+        """Should retry on ReadOnlyError (failover scenario)."""
+        call_count = 0
+
+        @with_redis_retry(max_retries=2, base_delay=0.01)
+        async def operation():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise ReadOnlyError("READONLY You can't write against a read only replica.")
+            return "success"
+
+        result = await operation()
+        assert result == "success"
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_on_busy_loading_error(self):
+        """Should retry on BusyLoadingError."""
+        call_count = 0
+
+        @with_redis_retry(max_retries=2, base_delay=0.01)
+        async def operation():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise BusyLoadingError("Redis is loading the dataset in memory")
+            return "success"
+
+        result = await operation()
+        assert result == "success"
+        assert call_count == 2
+
     @pytest.mark.asyncio
     async def test_default_parameters(self):
         """Should use default parameters when not specified."""

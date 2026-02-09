@@ -299,6 +299,7 @@ Retried exceptions:
 - `ConnectionError` - Network connectivity issues
 - `TimeoutError` - Operation timeouts
 - `BusyLoadingError` - Redis loading dataset
+- `ReadOnlyError` - Write to a replica during Sentinel failover
 
 ### Connection Pool Sizing
 

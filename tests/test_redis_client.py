@@ -168,6 +168,11 @@ class TestRedisClientSentinelMode:
             "mymaster",
             db=0,
             ssl=False,
+            password="sentinel_password",
+            socket_timeout=5.0,
+            socket_connect_timeout=2.0,
+            max_connections=100,
+            health_check_interval=30,
         )
         assert client is mock_master
     
@@ -188,6 +193,138 @@ class TestRedisClientSentinelMode:
         hosts = call_args[0][0]
         assert len(hosts) == 3
         assert hosts[0] == ("sentinel1.example.com", 26379)
+
+    @patch('ha_redis.Sentinel')
+    def test_get_client_sentinel_custom_pool_config(
+        self,
+        mock_sentinel_class,
+    ):
+        """Custom RedisConfig pool values should propagate through master_for()."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("sentinel1", 26379)],
+            sentinel_master_name="mymaster",
+            password="mypass",
+            db=2,
+            ssl=True,
+            max_connections=200,
+            socket_timeout=15.0,
+            socket_connect_timeout=8.0,
+            health_check_interval=120,
+        )
+        client = RedisClient(config)
+
+        mock_sentinel_instance = MagicMock()
+        mock_sentinel_instance.master_for.return_value = MagicMock()
+        mock_sentinel_class.return_value = mock_sentinel_instance
+
+        client.get_client()
+
+        mock_sentinel_instance.master_for.assert_called_once_with(
+            "mymaster",
+            db=2,
+            ssl=True,
+            password="mypass",
+            socket_timeout=15.0,
+            socket_connect_timeout=8.0,
+            max_connections=200,
+            health_check_interval=120,
+        )
+
+    @patch('ha_redis.Sentinel')
+    def test_get_replica_client_forwards_pool_config(
+        self,
+        mock_sentinel_class,
+    ):
+        """slave_for() should receive all pool config kwargs."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("sentinel1", 26379)],
+            sentinel_master_name="mymaster",
+            password="replicapass",
+            db=3,
+            ssl=True,
+            max_connections=75,
+            socket_timeout=7.0,
+            socket_connect_timeout=3.0,
+            health_check_interval=45,
+        )
+        client = RedisClient(config)
+
+        mock_sentinel_instance = MagicMock()
+        mock_sentinel_instance.slave_for.return_value = MagicMock()
+        mock_sentinel_class.return_value = mock_sentinel_instance
+
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(client.get_replica_client())
+
+        mock_sentinel_instance.slave_for.assert_called_once_with(
+            "mymaster",
+            db=3,
+            ssl=True,
+            password="replicapass",
+            socket_timeout=7.0,
+            socket_connect_timeout=3.0,
+            max_connections=75,
+            health_check_interval=45,
+        )
+
+    @patch('ha_redis.Sentinel')
+    def test_sentinel_protocol_timeouts_configurable(
+        self,
+        mock_sentinel_class,
+    ):
+        """_create_sentinel() should use sentinel_socket_timeout and sentinel_socket_connect_timeout."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("sentinel1", 26379)],
+            sentinel_master_name="mymaster",
+            sentinel_socket_timeout=2.5,
+            sentinel_socket_connect_timeout=1.5,
+        )
+        client = RedisClient(config)
+
+        mock_sentinel_instance = MagicMock()
+        mock_sentinel_instance.master_for.return_value = MagicMock()
+        mock_sentinel_class.return_value = mock_sentinel_instance
+
+        client.get_client()
+
+        call_kwargs = mock_sentinel_class.call_args[1]
+        assert call_kwargs["socket_timeout"] == 2.5
+        assert call_kwargs["socket_connect_timeout"] == 1.5
+        # max_connections should NOT be passed to Sentinel()
+        assert "max_connections" not in call_kwargs
+
+    @patch('ha_redis.Sentinel')
+    def test_sentinel_password_forwarded_to_data_client(
+        self,
+        mock_sentinel_class,
+    ):
+        """password should be forwarded to both master_for() and slave_for()."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("sentinel1", 26379)],
+            sentinel_master_name="mymaster",
+            password="data_password",
+        )
+        client = RedisClient(config)
+
+        mock_sentinel_instance = MagicMock()
+        mock_sentinel_instance.master_for.return_value = MagicMock()
+        mock_sentinel_instance.slave_for.return_value = MagicMock()
+        mock_sentinel_class.return_value = mock_sentinel_instance
+
+        # Verify master_for receives password
+        client.get_client()
+        master_call_kwargs = mock_sentinel_instance.master_for.call_args[1]
+        assert master_call_kwargs["password"] == "data_password"
+
+        # Verify slave_for receives password
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(client.get_replica_client())
+        slave_call_kwargs = mock_sentinel_instance.slave_for.call_args[1]
+        assert slave_call_kwargs["password"] == "data_password"
 
 
 class TestRedisClientHealthCheck:
