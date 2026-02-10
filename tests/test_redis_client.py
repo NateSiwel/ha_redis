@@ -724,3 +724,92 @@ class TestRedisClientLogging:
         await redis_client_with_mock_logger.close()
         
         mock_logger.info.assert_called()
+
+
+class TestResetClient:
+    """Test RedisClient._reset_client() method."""
+
+    @pytest.mark.asyncio
+    async def test_reset_client_nullifies_client(self, sentinel_config):
+        """After _reset_client(), self._client is None and self._initialized is False."""
+        client = RedisClient(sentinel_config)
+        mock_redis = AsyncMock()
+        client._client = mock_redis
+        client._initialized = True
+
+        await client._reset_client()
+
+        assert client._client is None
+        assert client._initialized is False
+
+    @pytest.mark.asyncio
+    async def test_reset_client_preserves_sentinel(self, sentinel_config):
+        """_reset_client() should preserve the Sentinel instance."""
+        client = RedisClient(sentinel_config)
+        mock_sentinel = MagicMock()
+        mock_redis = AsyncMock()
+        client._sentinel = mock_sentinel
+        client._client = mock_redis
+        client._initialized = True
+
+        await client._reset_client()
+
+        assert client._sentinel is mock_sentinel  # preserved
+        assert client._client is None
+
+    @pytest.mark.asyncio
+    async def test_reset_client_allows_reinitialization(self, sentinel_config):
+        """After _reset_client(), get_client() creates a new client via master_for()."""
+        client = RedisClient(sentinel_config)
+        mock_sentinel = MagicMock()
+        new_mock_client = MagicMock()
+        mock_sentinel.master_for.return_value = new_mock_client
+        client._sentinel = mock_sentinel
+        client._client = AsyncMock()
+        client._initialized = True
+
+        await client._reset_client()
+
+        # Now get_client() should create a new client
+        result = client.get_client()
+        assert result is new_mock_client
+        mock_sentinel.master_for.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reset_client_closes_old_client(self, sentinel_config):
+        """_reset_client() calls close() on the old client before nullifying."""
+        client = RedisClient(sentinel_config)
+        mock_redis = AsyncMock()
+        client._client = mock_redis
+        client._initialized = True
+
+        await client._reset_client()
+
+        mock_redis.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reset_client_swallows_close_errors(self, sentinel_config):
+        """If client.close() raises, _reset_client() still completes and nullifies _client."""
+        client = RedisClient(sentinel_config)
+        mock_redis = AsyncMock()
+        mock_redis.close.side_effect = Exception("close failed")
+        client._client = mock_redis
+        client._initialized = True
+
+        await client._reset_client()
+
+        assert client._client is None
+        assert client._initialized is False
+
+    @pytest.mark.asyncio
+    async def test_reset_client_noop_when_no_client(self, sentinel_config):
+        """_reset_client() when _client is None completes without error."""
+        client = RedisClient(sentinel_config)
+        client._client = None
+        client._initialized = False
+
+        # Should not raise
+        await client._reset_client()
+
+        assert client._client is None
+        assert client._initialized is False

@@ -187,8 +187,120 @@ class TestWithRetryDecorator:
         # Should fail on first call without retrying
         assert call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_reset_client_on_readonly_error_sentinel_mode(self):
+        """In Sentinel mode, ReadOnlyError should trigger _reset_client()."""
+        sentinel_config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("localhost", 26379)],
+            sentinel_master_name="mymaster",
+        )
+        client = RedisClient(sentinel_config)
+        client._client = AsyncMock()
+        client._initialized = True
+        client._reset_client = AsyncMock()
 
-class TestWithRedisRetryStandalone:
+        call_count = 0
+
+        @client.with_retry(max_retries=2, base_delay=0.01)
+        async def operation():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ReadOnlyError("READONLY You can't write against a read only replica.")
+            return "success"
+
+        result = await operation()
+        assert result == "success"
+        assert client._reset_client.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_reset_on_readonly_error_direct_mode(self):
+        """When use_sentinel=False and ReadOnlyError occurs, _reset_client() is NOT called."""
+        config = RedisConfig(use_sentinel=False)
+        client = RedisClient(config)
+        client._client = AsyncMock()
+        client._pool = AsyncMock()
+        client._initialized = True
+        client._reset_client = AsyncMock()
+
+        call_count = 0
+
+        @client.with_retry(max_retries=2, base_delay=0.01)
+        async def operation():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise ReadOnlyError("READONLY You can't write against a read only replica.")
+            return "success"
+
+        result = await operation()
+        assert result == "success"
+        assert client._reset_client.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_no_reset_on_timeout_error(self):
+        """TimeoutError does not trigger _reset_client() even in Sentinel mode."""
+        sentinel_config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("localhost", 26379)],
+            sentinel_master_name="mymaster",
+        )
+        client = RedisClient(sentinel_config)
+        client._client = AsyncMock()
+        client._initialized = True
+        client._reset_client = AsyncMock()
+
+        call_count = 0
+
+        @client.with_retry(max_retries=2, base_delay=0.01)
+        async def operation():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise TimeoutError("Operation timed out")
+            return "success"
+
+        result = await operation()
+        assert result == "success"
+        assert client._reset_client.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_reset_and_recovery_on_failover(self):
+        """End-to-end: ReadOnlyError -> reset -> get_client() creates new client -> succeeds."""
+        sentinel_config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("localhost", 26379)],
+            sentinel_master_name="mymaster",
+        )
+        client = RedisClient(sentinel_config)
+        mock_sentinel = MagicMock()
+        old_redis_client = AsyncMock()
+        new_redis_client = AsyncMock()
+        mock_sentinel.master_for.return_value = new_redis_client
+
+        client._sentinel = mock_sentinel
+        client._client = old_redis_client
+        client._initialized = True
+
+        call_count = 0
+
+        @client.with_retry(max_retries=2, base_delay=0.01)
+        async def operation():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ReadOnlyError("READONLY You can't write against a read only replica.")
+            # After reset, get_client() should return the new client
+            result_client = client.get_client()
+            assert result_client is new_redis_client
+            return "recovered"
+
+        result = await operation()
+        assert result == "recovered"
+        assert call_count == 2
+        # old client should have been closed during reset
+        old_redis_client.close.assert_called_once()
     """Test standalone with_redis_retry decorator."""
     
     @pytest.mark.asyncio

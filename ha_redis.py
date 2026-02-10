@@ -353,6 +353,30 @@ class RedisClient:
             self._initialized = False
             self.logger.info("Redis connection pool closed")
     
+    async def _reset_client(self) -> None:
+        """
+        Reset the cached client to force master re-discovery via Sentinel.
+
+        This is a defensive fallback for edge cases where redis-py's built-in
+        SentinelManagedConnection failover handling cannot recover (e.g.,
+        delayed Sentinel convergence, pool state corruption).
+
+        The Sentinel instance is preserved to avoid redundant discovery
+        connections. Only the client and its connection pool are torn down.
+
+        Thread-safety: Acquires _init_lock to prevent races with
+        initialize() and close().
+        """
+        async with self._init_lock:
+            if self._client is not None:
+                try:
+                    await self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+            self._initialized = False
+            self.logger.info("Client reset — will re-discover master on next operation")
+    
     # =========================================================================
     # Sentinel-specific Operations
     # =========================================================================
@@ -629,6 +653,21 @@ class RedisClient:
                     except RETRYABLE_EXCEPTIONS as e:
                         last_error = e
                         if attempt < retries:
+                            # On failover-indicating errors in Sentinel mode,
+                            # reset the client to force master re-discovery.
+                            # This complements redis-py's built-in
+                            # SentinelManagedConnection failover handling as
+                            # a defensive fallback for edge cases.
+                            if self.config.use_sentinel and isinstance(
+                                e, (ReadOnlyError, ConnectionError)
+                            ):
+                                self.logger.warning(
+                                    f"Failover-related error in Sentinel mode "
+                                    f"(attempt {attempt + 1}/{retries + 1}): "
+                                    f"{type(e).__name__}: {e} — resetting client"
+                                )
+                                await self._reset_client()
+
                             # Exponential backoff with jitter to prevent thundering herds
                             backoff = delay * (2 ** attempt)
                             jitter = random.uniform(0, 0.1 * backoff)
@@ -658,6 +697,9 @@ def with_redis_retry(max_retries: int = 3, base_delay: float = 0.1) -> Callable:
     operations or requires application-level retry guarantees.
     
     Note: This decorator provides the sole layer of retry logic.
+    This standalone decorator does not have access to a RedisClient
+    instance and cannot reset the client on failover. For Sentinel (HA)
+    mode, prefer the instance method decorator: client.with_retry().
     
     Args:
         max_retries: Maximum number of retry attempts
