@@ -269,6 +269,13 @@ class RedisClient:
         - Connection health checks
         - Timeout protection
         
+        Concurrency note:
+            This method is synchronous and does not acquire ``_init_lock``.
+            For concurrent startup, call ``await initialize()`` (or use the
+            ``async with`` context manager) **before** issuing parallel
+            operations. After initialization, this method is a lock-free
+            fast-path that simply returns the cached client.
+        
         Returns:
             Async Redis client instance
         """
