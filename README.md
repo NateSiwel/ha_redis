@@ -132,6 +132,29 @@ async def main():
 asyncio.run(main())
 ```
 
+### Initialization Without a Context Manager
+
+If you cannot use `async with`, call `initialize()` before issuing concurrent
+operations. This acquires an internal lock so the connection pool is created
+exactly once, even when multiple tasks start simultaneously.
+
+```python
+async def main():
+    client = RedisClient(RedisConfig())
+    await client.initialize()  # safe for concurrent startup
+
+    # get_client() is now a lock-free fast path
+    redis = client.get_client()
+    await redis.set("key", "value")
+
+    await client.close()  # clean up when done
+```
+
+> **Note:** Calling `get_client()` without prior initialization works for
+> single-task startup but is *not* concurrency-safe. Always use
+> `async with` or `await initialize()` when multiple tasks may start
+> at the same time.
+
 ### Common Redis Operations
 
 ```python

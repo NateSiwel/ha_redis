@@ -5,6 +5,17 @@ ha_redis — Comprehensive Sample
 Connects to the Sentinel HA topology defined in docker-compose.yml
 and exercises every feature of the ha_redis library.
 
+Initialization pattern:
+    This sample uses ``async with RedisClient(config) as client``
+    which calls ``await initialize()`` automatically. This is the
+    recommended pattern — it acquires an internal lock so the
+    connection pool is created exactly once, even under concurrent
+    startup.
+
+    If you cannot use the context manager, call
+    ``await client.initialize()`` explicitly before issuing
+    concurrent operations.
+
 Prerequisites:
     docker compose --profile ha up -d
     pip install redis

@@ -123,26 +123,31 @@ class RedisClient:
     - Support for both direct and Sentinel (HA) modes
     - Context manager support for proper resource cleanup
     
-    Example usage:
-        # Direct connection mode
-        config = RedisConfig(host="localhost", port=6379)
-        client = RedisClient(config)
-        
-        redis = client.get_client()
-        await redis.set("key", "value")
+    Recommended usage (async context manager)::
+    
+        # Direct connection
+        async with RedisClient(RedisConfig(host="localhost")) as client:
+            redis = client.get_client()
+            await redis.set("key", "value")
         
         # Sentinel (HA) mode
         config = RedisConfig(
             use_sentinel=True,
             sentinel_hosts=[("sentinel1", 26379), ("sentinel2", 26379)],
-            sentinel_master_name="mymaster"
+            sentinel_master_name="mymaster",
         )
-        client = RedisClient(config)
-        
-        # As async context manager
         async with RedisClient(config) as client:
             redis = client.get_client()
             await redis.set("key", "value")
+    
+    Without a context manager, call ``initialize()`` before concurrent use::
+    
+        client = RedisClient(config)
+        await client.initialize()  # acquires lock, safe for concurrency
+        # get_client() is now a lock-free fast path
+        redis = client.get_client()
+        ...
+        await client.close()  # clean up when done
     """
     
     def __init__(
