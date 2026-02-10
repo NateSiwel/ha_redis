@@ -731,15 +731,17 @@ class TestResetClient:
 
     @pytest.mark.asyncio
     async def test_reset_client_nullifies_client(self, sentinel_config):
-        """After _reset_client(), self._client is None and self._initialized is False."""
+        """After _reset_client(), self._client and self._replica_client are None."""
         client = RedisClient(sentinel_config)
         mock_redis = AsyncMock()
         client._client = mock_redis
+        client._replica_client = AsyncMock()
         client._initialized = True
 
         await client._reset_client()
 
         assert client._client is None
+        assert client._replica_client is None
         assert client._initialized is False
 
     @pytest.mark.asyncio
@@ -748,14 +750,17 @@ class TestResetClient:
         client = RedisClient(sentinel_config)
         mock_sentinel = MagicMock()
         mock_redis = AsyncMock()
+        mock_replica = AsyncMock()
         client._sentinel = mock_sentinel
         client._client = mock_redis
+        client._replica_client = mock_replica
         client._initialized = True
 
         await client._reset_client()
 
         assert client._sentinel is mock_sentinel  # preserved
         assert client._client is None
+        assert client._replica_client is None
 
     @pytest.mark.asyncio
     async def test_reset_client_allows_reinitialization(self, sentinel_config):
@@ -812,4 +817,50 @@ class TestResetClient:
         await client._reset_client()
 
         assert client._client is None
+        assert client._initialized is False
+
+    @pytest.mark.asyncio
+    async def test_reset_client_closes_replica_client(self, sentinel_config):
+        """_reset_client() calls close() on the cached replica client."""
+        client = RedisClient(sentinel_config)
+        mock_master = AsyncMock()
+        mock_replica = AsyncMock()
+        client._client = mock_master
+        client._replica_client = mock_replica
+        client._initialized = True
+
+        await client._reset_client()
+
+        mock_master.close.assert_called_once()
+        mock_replica.close.assert_called_once()
+        assert client._client is None
+        assert client._replica_client is None
+
+    @pytest.mark.asyncio
+    async def test_reset_client_swallows_replica_close_errors(self, sentinel_config):
+        """If _replica_client.close() raises, _reset_client() still completes."""
+        client = RedisClient(sentinel_config)
+        mock_replica = AsyncMock()
+        mock_replica.close.side_effect = Exception("replica close failed")
+        client._replica_client = mock_replica
+        client._initialized = True
+
+        await client._reset_client()
+
+        assert client._replica_client is None
+        assert client._initialized is False
+
+    @pytest.mark.asyncio
+    async def test_reset_client_replica_only(self, sentinel_config):
+        """When _client is None but _replica_client exists, only replica is torn down."""
+        client = RedisClient(sentinel_config)
+        mock_replica = AsyncMock()
+        client._client = None
+        client._replica_client = mock_replica
+        client._initialized = True
+
+        await client._reset_client()
+
+        mock_replica.close.assert_called_once()
+        assert client._replica_client is None
         assert client._initialized is False

@@ -367,17 +367,17 @@ class RedisClient:
     
     async def _reset_client(self) -> None:
         """
-        Reset the cached client to force master re-discovery via Sentinel.
+        Reset the cached clients to force re-discovery via Sentinel.
 
         This is a defensive fallback for edge cases where redis-py's built-in
         SentinelManagedConnection failover handling cannot recover (e.g.,
         delayed Sentinel convergence, pool state corruption).
 
-        The Sentinel instance is preserved to avoid redundant discovery
-        connections. Only the client and its connection pool are torn down.
+        Both the master and replica clients are torn down. The Sentinel
+        instance is preserved to avoid redundant discovery connections.
 
         Thread-safety: Acquires _init_lock to prevent races with
-        initialize() and close().
+        initialize(), get_replica_client(), and close().
         """
         async with self._init_lock:
             if self._client is not None:
@@ -386,8 +386,14 @@ class RedisClient:
                 except Exception:
                     pass
                 self._client = None
+            if self._replica_client is not None:
+                try:
+                    await self._replica_client.close()
+                except Exception:
+                    pass
+                self._replica_client = None
             self._initialized = False
-            self.logger.info("Client reset — will re-discover master on next operation")
+            self.logger.info("Client reset — will re-discover on next operation")
     
     # =========================================================================
     # Sentinel-specific Operations
@@ -577,6 +583,9 @@ class RedisClient:
         
         The client is cached and reused across calls. Call close() to
         release the connection pool when done.
+
+        Tip: Wrap replica operations with ``client.with_retry()`` for
+        automatic failover recovery during topology changes.
         
         Returns:
             Redis client connected to a replica, or None if not in
