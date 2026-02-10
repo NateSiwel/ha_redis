@@ -51,6 +51,11 @@ class TestRedisClientInitialization:
         assert redis_client._client is None
         assert redis_client._sentinel is None
         assert redis_client._initialized is False
+    
+    def test_init_creates_lock(self, redis_client):
+        """Verify _init_lock is an asyncio.Lock instance."""
+        import asyncio
+        assert isinstance(redis_client._init_lock, asyncio.Lock)
 
 
 class TestRedisClientDirectMode:
@@ -427,6 +432,105 @@ class TestRedisClientClose:
         await redis_client.close()
         
         assert redis_client._client is None
+    
+    @pytest.mark.asyncio
+    async def test_close_waits_for_initialization(self, default_config):
+        """close() called during initialize() should not corrupt state."""
+        import asyncio
+        with patch('ha_redis.redis.ConnectionPool.from_url') as mock_pool, \
+             patch('ha_redis.redis.Redis') as mock_redis_class:
+            mock_pool_instance = MagicMock()
+            mock_pool_instance.disconnect = AsyncMock()
+            mock_pool.return_value = mock_pool_instance
+            mock_client = MagicMock()
+            mock_client.close = AsyncMock()
+            mock_redis_class.return_value = mock_client
+            
+            client = RedisClient(default_config)
+            
+            # Run initialize and close concurrently; the lock ensures
+            # close waits for initialization to finish
+            await asyncio.gather(
+                client.initialize(),
+                client.close(),
+            )
+            
+            # After both complete, state should be clean
+            assert client._initialized is False
+            assert client._client is None
+
+
+class TestRedisClientInitialize:
+    """Test async initialize() method."""
+    
+    @pytest.mark.asyncio
+    async def test_initialize_sets_initialized(self, default_config):
+        """await client.initialize() sets _initialized = True."""
+        with patch('ha_redis.redis.ConnectionPool.from_url') as mock_pool, \
+             patch('ha_redis.redis.Redis') as mock_redis_class:
+            mock_pool.return_value = MagicMock()
+            mock_redis_class.return_value = MagicMock()
+            
+            client = RedisClient(default_config)
+            await client.initialize()
+            
+            assert client._initialized is True
+    
+    @pytest.mark.asyncio
+    async def test_initialize_creates_client(self, default_config):
+        """After initialize(), get_client() returns existing client without creating a new one."""
+        with patch('ha_redis.redis.ConnectionPool.from_url') as mock_pool, \
+             patch('ha_redis.redis.Redis') as mock_redis_class:
+            mock_pool.return_value = MagicMock()
+            mock_client = MagicMock()
+            mock_redis_class.return_value = mock_client
+            
+            client = RedisClient(default_config)
+            await client.initialize()
+            
+            # get_client() should return the already-created client
+            result = client.get_client()
+            assert result is mock_client
+            # Pool created only once (during initialize)
+            assert mock_pool.call_count == 1
+    
+    @pytest.mark.asyncio
+    async def test_initialize_idempotent(self, default_config):
+        """Calling initialize() twice creates pool only once."""
+        with patch('ha_redis.redis.ConnectionPool.from_url') as mock_pool, \
+             patch('ha_redis.redis.Redis') as mock_redis_class:
+            mock_pool.return_value = MagicMock()
+            mock_redis_class.return_value = MagicMock()
+            
+            client = RedisClient(default_config)
+            await client.initialize()
+            await client.initialize()
+            
+            assert mock_pool.call_count == 1
+    
+    @pytest.mark.asyncio
+    async def test_initialize_concurrent_safety(self, default_config):
+        """Multiple concurrent initialize() calls should create pool exactly once."""
+        import asyncio
+        with patch('ha_redis.redis.ConnectionPool.from_url') as mock_pool_from_url, \
+             patch('ha_redis.redis.Redis') as mock_redis_class:
+            mock_pool_instance = MagicMock()
+            mock_pool_instance.disconnect = AsyncMock()
+            mock_pool_from_url.return_value = mock_pool_instance
+            mock_client = MagicMock()
+            mock_client.close = AsyncMock()
+            mock_redis_class.return_value = mock_client
+            
+            client = RedisClient(default_config)
+            
+            # Launch 10 concurrent initialize() calls
+            await asyncio.gather(*[client.initialize() for _ in range(10)])
+            
+            # Pool should be created exactly once
+            assert mock_pool_from_url.call_count == 1
+            assert client._initialized is True
+            
+            await client.close()
 
 
 class TestRedisClientContextManager:
@@ -434,11 +538,39 @@ class TestRedisClientContextManager:
     
     @pytest.mark.asyncio
     async def test_context_manager_enter(self, default_config):
-        """__aenter__ should return the client."""
-        client = RedisClient(default_config)
-        
-        async with client as ctx:
-            assert ctx is client
+        """__aenter__ should return the client and initialize it."""
+        with patch('ha_redis.redis.ConnectionPool.from_url') as mock_pool, \
+             patch('ha_redis.redis.Redis') as mock_redis_class:
+            mock_pool_instance = MagicMock()
+            mock_pool_instance.disconnect = AsyncMock()
+            mock_pool.return_value = mock_pool_instance
+            mock_client = MagicMock()
+            mock_client.close = AsyncMock()
+            mock_redis_class.return_value = mock_client
+            
+            client = RedisClient(default_config)
+            
+            async with client as ctx:
+                assert ctx is client
+                assert client._initialized is True
+    
+    @pytest.mark.asyncio
+    async def test_context_manager_initializes(self, default_config):
+        """async with should call initialize(), client is ready inside the block."""
+        with patch('ha_redis.redis.ConnectionPool.from_url') as mock_pool, \
+             patch('ha_redis.redis.Redis') as mock_redis_class:
+            mock_pool_instance = MagicMock()
+            mock_pool_instance.disconnect = AsyncMock()
+            mock_pool.return_value = mock_pool_instance
+            mock_client = MagicMock()
+            mock_client.close = AsyncMock()
+            mock_redis_class.return_value = mock_client
+            
+            client = RedisClient(default_config)
+            
+            async with client as ctx:
+                result = ctx.get_client()
+                assert result is mock_client
     
     @pytest.mark.asyncio
     async def test_context_manager_exit_closes(self, default_config):
@@ -446,6 +578,7 @@ class TestRedisClientContextManager:
         client = RedisClient(default_config)
         client._client = AsyncMock()
         client._pool = AsyncMock()
+        client._initialized = True
         
         async with client:
             pass
@@ -459,6 +592,7 @@ class TestRedisClientContextManager:
         client = RedisClient(default_config)
         client._client = AsyncMock()
         client._pool = AsyncMock()
+        client._initialized = True
         
         with pytest.raises(ValueError):
             async with client:

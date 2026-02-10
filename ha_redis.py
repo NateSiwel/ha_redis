@@ -156,6 +156,7 @@ class RedisClient:
         self._replica_client: Optional[redis.Redis] = None
         self._sentinel: Optional[Sentinel] = None
         self._initialized = False
+        self._init_lock = asyncio.Lock()
     
     def _create_pool(self) -> redis.ConnectionPool:
         """
@@ -214,6 +215,30 @@ class RedisClient:
         
         return sentinel
     
+    async def initialize(self) -> None:
+        """
+        Pre-initialize the Redis client and connection pool.
+
+        Safe to call concurrently from multiple async tasks. Uses a lock
+        to ensure initialization happens exactly once.
+
+        This is called automatically when using the async context manager.
+        For manual instantiation, call this method during application
+        startup before issuing concurrent operations.
+
+        Example:
+            client = RedisClient(config)
+            await client.initialize()
+            # Now safe to call get_client() from any task
+        """
+        if self._initialized:
+            return
+
+        async with self._init_lock:
+            if self._initialized:
+                return
+            self.get_client()   # Synchronous — runs fully under the lock
+
     def get_client(self) -> redis.Redis:
         """
         Returns a resilient async Redis client instance.
@@ -282,28 +307,29 @@ class RedisClient:
         Call this during application shutdown.
         Handles both Sentinel mode and direct connection mode cleanup.
         """
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
-        
-        if self._replica_client is not None:
-            await self._replica_client.close()
-            self._replica_client = None
-        
-        if self._pool is not None:
-            await self._pool.disconnect()
-            self._pool = None
-        
-        if self._sentinel is not None:
-            # Sentinel doesn't have a close() method, but we can close
-            # the underlying sentinel connections
-            for sentinel_conn in self._sentinel.sentinels:
-                await sentinel_conn.close()
-            self._sentinel = None
-            self.logger.info("Redis Sentinel connections closed")
-        
-        self._initialized = False
-        self.logger.info("Redis connection pool closed")
+        async with self._init_lock:
+            if self._client is not None:
+                await self._client.close()
+                self._client = None
+            
+            if self._replica_client is not None:
+                await self._replica_client.close()
+                self._replica_client = None
+            
+            if self._pool is not None:
+                await self._pool.disconnect()
+                self._pool = None
+            
+            if self._sentinel is not None:
+                # Sentinel doesn't have a close() method, but we can close
+                # the underlying sentinel connections
+                for sentinel_conn in self._sentinel.sentinels:
+                    await sentinel_conn.close()
+                self._sentinel = None
+                self.logger.info("Redis Sentinel connections closed")
+            
+            self._initialized = False
+            self.logger.info("Redis connection pool closed")
     
     # =========================================================================
     # Sentinel-specific Operations
@@ -503,25 +529,33 @@ class RedisClient:
         if self._replica_client is not None:
             return self._replica_client
         
-        try:
-            sentinel = self.get_sentinel()
-            self._replica_client = sentinel.slave_for(
-                self.config.sentinel_master_name,
-                db=self.config.db,
-                ssl=self.config.ssl,
-                password=self.config.password,
-                socket_timeout=self.config.socket_timeout,
-                socket_connect_timeout=self.config.socket_connect_timeout,
-                max_connections=self.config.max_connections,
-                health_check_interval=self.config.health_check_interval,
-            )
-            return self._replica_client
-        except (ConnectionError, TimeoutError, RedisError) as e:
-            self.logger.error(f"Failed to get replica client: {type(e).__name__}: {e}")
-            return None
+        async with self._init_lock:
+            # Double-checked locking
+            if self._replica_client is not None:
+                return self._replica_client
+
+            try:
+                sentinel = self.get_sentinel()
+                self._replica_client = sentinel.slave_for(
+                    self.config.sentinel_master_name,
+                    db=self.config.db,
+                    ssl=self.config.ssl,
+                    password=self.config.password,
+                    socket_timeout=self.config.socket_timeout,
+                    socket_connect_timeout=self.config.socket_connect_timeout,
+                    max_connections=self.config.max_connections,
+                    health_check_interval=self.config.health_check_interval,
+                )
+                return self._replica_client
+            except (ConnectionError, TimeoutError, RedisError) as e:
+                self.logger.error(
+                    f"Failed to get replica client: {type(e).__name__}: {e}"
+                )
+                return None
 
     async def __aenter__(self) -> "RedisClient":
-        """Async context manager entry."""
+        """Async context manager entry — initializes client."""
+        await self.initialize()
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
