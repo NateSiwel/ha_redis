@@ -340,11 +340,11 @@ class TestExponentialBackoff:
             with pytest.raises(ConnectionError):
                 await operation()
         
-        # Verify exponential backoff: 0.1, 0.2, 0.4
+        # Verify exponential backoff: 0.1, 0.2, 0.4 (plus jitter)
         assert len(delays) == 3
-        assert delays[0] == pytest.approx(0.1)
-        assert delays[1] == pytest.approx(0.2)
-        assert delays[2] == pytest.approx(0.4)
+        assert 0.1 <= delays[0] <= 0.11
+        assert 0.2 <= delays[1] <= 0.22
+        assert 0.4 <= delays[2] <= 0.44
     
     @pytest.mark.asyncio
     async def test_no_sleep_on_success(self, mocked_redis_client):

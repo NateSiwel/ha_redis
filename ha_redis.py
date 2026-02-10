@@ -10,6 +10,8 @@ Provides a resilient, connection-pooled Redis client with:
 
 import logging
 import asyncio
+import random
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Callable, Any
 from functools import wraps
@@ -98,12 +100,16 @@ class RedisConfig:
     sentinel_socket_timeout: float = 1.0
     sentinel_socket_connect_timeout: float = 1.0
     sentinel_password: Optional[str] = None
+    client_name: str = "ha_redis"
 
     @property
     def url(self) -> str:
         """Generate Redis URL from configuration."""
         scheme = "rediss" if self.ssl else "redis"
-        auth = f":{self.password}@" if self.password else ""
+        auth = ""
+        if self.password:
+            encoded_password = urllib.parse.quote(self.password)
+            auth = f":{encoded_password}@"
         return f"{scheme}://{auth}{self.host}:{self.port}/{self.db}"
 
 
@@ -180,6 +186,7 @@ class RedisClient:
             socket_connect_timeout=self.config.socket_connect_timeout,
             retry_on_timeout=False,
             health_check_interval=self.config.health_check_interval,
+            client_name=self.config.client_name,
         )
         
         self.logger.info(
@@ -206,6 +213,9 @@ class RedisClient:
             sentinel_kwargs["password"] = self.config.sentinel_password
         if self.config.ssl:
             sentinel_kwargs["ssl"] = True
+        
+        # Identify our client to Sentinel nodes
+        sentinel_kwargs["client_name"] = f"{self.config.client_name}_sentinel"
 
         sentinel = Sentinel(
             self.config.sentinel_hosts,
@@ -279,6 +289,7 @@ class RedisClient:
                 socket_connect_timeout=self.config.socket_connect_timeout,
                 max_connections=self.config.max_connections,
                 health_check_interval=self.config.health_check_interval,
+                client_name=self.config.client_name,
             )
             self.logger.info(
                 f"Connected to Sentinel master: {self.config.sentinel_master_name}"
@@ -475,7 +486,9 @@ class RedisClient:
                         master_addr = (master_host, int(master_port))
                     
                     # Extract health and cluster info
-                    flags = info_dict.get("flags", "")
+                    flags_str = info_dict.get("flags", "")
+                    flags = flags_str.split(",") if isinstance(flags_str, str) else []
+                    
                     is_healthy = (
                         "master" in flags and 
                         "s_down" not in flags and 
@@ -556,6 +569,7 @@ class RedisClient:
                     socket_connect_timeout=self.config.socket_connect_timeout,
                     max_connections=self.config.max_connections,
                     health_check_interval=self.config.health_check_interval,
+                    client_name=f"{self.config.client_name}_replica",
                 )
                 return self._replica_client
             except (ConnectionError, TimeoutError, RedisError) as e:
@@ -615,7 +629,11 @@ class RedisClient:
                     except RETRYABLE_EXCEPTIONS as e:
                         last_error = e
                         if attempt < retries:
-                            sleep_time = delay * (2 ** attempt)
+                            # Exponential backoff with jitter to prevent thundering herds
+                            backoff = delay * (2 ** attempt)
+                            jitter = random.uniform(0, 0.1 * backoff)
+                            sleep_time = backoff + jitter
+                            
                             self.logger.warning(
                                 f"Redis operation failed (attempt {attempt + 1}/{retries + 1}), "
                                 f"retrying in {sleep_time:.2f}s: {e}"
@@ -666,7 +684,11 @@ def with_redis_retry(max_retries: int = 3, base_delay: float = 0.1) -> Callable:
                 except RETRYABLE_EXCEPTIONS as e:
                     last_error = e
                     if attempt < max_retries:
-                        delay = base_delay * (2 ** attempt)
+                        # Exponential backoff with jitter
+                        backoff = base_delay * (2 ** attempt)
+                        jitter = random.uniform(0, 0.1 * backoff)
+                        delay = backoff + jitter
+                        
                         logger.warning(
                             f"Redis operation failed (attempt {attempt + 1}/{max_retries + 1}), "
                             f"retrying in {delay:.2f}s: {e}"

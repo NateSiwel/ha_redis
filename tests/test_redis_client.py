@@ -178,6 +178,7 @@ class TestRedisClientSentinelMode:
             socket_connect_timeout=2.0,
             max_connections=100,
             health_check_interval=30,
+            client_name="ha_redis",
         )
         assert client is mock_master
     
@@ -234,6 +235,7 @@ class TestRedisClientSentinelMode:
             socket_connect_timeout=8.0,
             max_connections=200,
             health_check_interval=120,
+            client_name="ha_redis",
         )
 
     @patch('ha_redis.Sentinel')
@@ -272,6 +274,7 @@ class TestRedisClientSentinelMode:
             socket_connect_timeout=3.0,
             max_connections=75,
             health_check_interval=45,
+            client_name="ha_redis_replica",
         )
 
     @patch('ha_redis.Sentinel')
@@ -400,7 +403,7 @@ class TestRedisClientSentinelMode:
 
     @patch('ha_redis.Sentinel')
     def test_sentinel_kwargs_omitted_when_unnecessary(self, mock_sentinel_class):
-        """sentinel_kwargs should not be passed when not needed."""
+        """sentinel_kwargs should only contain client_name when other options are off."""
         config = RedisConfig(
             use_sentinel=True,
             sentinel_hosts=[("sentinel1", 26379)],
@@ -417,7 +420,9 @@ class TestRedisClientSentinelMode:
         client.get_client()
 
         call_kwargs = mock_sentinel_class.call_args[1]
-        assert "sentinel_kwargs" not in call_kwargs
+        sentinel_kwargs = call_kwargs.get("sentinel_kwargs", {})
+        assert "client_name" in sentinel_kwargs
+        assert len(sentinel_kwargs) == 1
 
 
 class TestRedisClientHealthCheck:
