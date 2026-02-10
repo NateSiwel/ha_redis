@@ -77,6 +77,8 @@ class RedisConfig:
         ssl: Whether to use SSL/TLS
         retry_attempts: Number of retry attempts for operations
         retry_base_delay: Base delay for exponential backoff
+        sentinel_password: Optional password for Sentinel nodes themselves
+                           (separate from data node password)
     """
     host: str = "localhost"
     port: int = 6379
@@ -95,6 +97,7 @@ class RedisConfig:
     # Sentinel discovery protocol timeouts (intentionally short)
     sentinel_socket_timeout: float = 1.0
     sentinel_socket_connect_timeout: float = 1.0
+    sentinel_password: Optional[str] = None
 
     @property
     def url(self) -> str:
@@ -197,6 +200,13 @@ class RedisClient:
         Returns:
             Configured Sentinel instance
         """
+        # Build sentinel_kwargs for Sentinel node connections (authentication + TLS)
+        sentinel_kwargs = {}
+        if self.config.sentinel_password is not None:
+            sentinel_kwargs["password"] = self.config.sentinel_password
+        if self.config.ssl:
+            sentinel_kwargs["ssl"] = True
+
         sentinel = Sentinel(
             self.config.sentinel_hosts,
             decode_responses=True,
@@ -205,6 +215,7 @@ class RedisClient:
             retry_on_timeout=False,
             password=self.config.password,
             ssl=self.config.ssl,
+            **({"sentinel_kwargs": sentinel_kwargs} if sentinel_kwargs else {}),
         )
         
         self.logger.info(

@@ -331,6 +331,94 @@ class TestRedisClientSentinelMode:
         slave_call_kwargs = mock_sentinel_instance.slave_for.call_args[1]
         assert slave_call_kwargs["password"] == "data_password"
 
+    @patch('ha_redis.Sentinel')
+    def test_sentinel_kwargs_password_forwarded(self, mock_sentinel_class):
+        """sentinel_password should be forwarded via sentinel_kwargs."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("sentinel1", 26379)],
+            sentinel_master_name="mymaster",
+            password="data_pass",
+            sentinel_password="sentinel_pass",
+        )
+        client = RedisClient(config)
+
+        mock_sentinel_instance = MagicMock()
+        mock_sentinel_instance.master_for.return_value = MagicMock()
+        mock_sentinel_class.return_value = mock_sentinel_instance
+
+        client.get_client()
+
+        call_kwargs = mock_sentinel_class.call_args[1]
+        # Data node password is top-level
+        assert call_kwargs["password"] == "data_pass"
+        # Sentinel node password is in sentinel_kwargs
+        assert call_kwargs["sentinel_kwargs"]["password"] == "sentinel_pass"
+
+    @patch('ha_redis.Sentinel')
+    def test_sentinel_kwargs_ssl_forwarded(self, mock_sentinel_class):
+        """When ssl=True, sentinel_kwargs should include ssl: True."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("sentinel1", 26379)],
+            sentinel_master_name="mymaster",
+            ssl=True,
+        )
+        client = RedisClient(config)
+
+        mock_sentinel_instance = MagicMock()
+        mock_sentinel_instance.master_for.return_value = MagicMock()
+        mock_sentinel_class.return_value = mock_sentinel_instance
+
+        client.get_client()
+
+        call_kwargs = mock_sentinel_class.call_args[1]
+        assert call_kwargs["sentinel_kwargs"]["ssl"] is True
+
+    @patch('ha_redis.Sentinel')
+    def test_sentinel_kwargs_password_and_ssl(self, mock_sentinel_class):
+        """When both sentinel_password and ssl are set, sentinel_kwargs contains both."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("sentinel1", 26379)],
+            sentinel_master_name="mymaster",
+            password="data_pass",
+            sentinel_password="sentinel_pass",
+            ssl=True,
+        )
+        client = RedisClient(config)
+
+        mock_sentinel_instance = MagicMock()
+        mock_sentinel_instance.master_for.return_value = MagicMock()
+        mock_sentinel_class.return_value = mock_sentinel_instance
+
+        client.get_client()
+
+        call_kwargs = mock_sentinel_class.call_args[1]
+        assert call_kwargs["sentinel_kwargs"]["password"] == "sentinel_pass"
+        assert call_kwargs["sentinel_kwargs"]["ssl"] is True
+
+    @patch('ha_redis.Sentinel')
+    def test_sentinel_kwargs_omitted_when_unnecessary(self, mock_sentinel_class):
+        """sentinel_kwargs should not be passed when not needed."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("sentinel1", 26379)],
+            sentinel_master_name="mymaster",
+            ssl=False,
+            sentinel_password=None,
+        )
+        client = RedisClient(config)
+
+        mock_sentinel_instance = MagicMock()
+        mock_sentinel_instance.master_for.return_value = MagicMock()
+        mock_sentinel_class.return_value = mock_sentinel_instance
+
+        client.get_client()
+
+        call_kwargs = mock_sentinel_class.call_args[1]
+        assert "sentinel_kwargs" not in call_kwargs
+
 
 class TestRedisClientHealthCheck:
     """Test health check functionality."""

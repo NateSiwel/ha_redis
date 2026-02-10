@@ -159,6 +159,22 @@ class TestRedisConfigSentinel:
         assert len(minimal_sentinel_config.sentinel_hosts) == 1
         assert minimal_sentinel_config.sentinel_master_name == "testmaster"
 
+    def test_sentinel_password_defaults_to_none(self):
+        """sentinel_password should default to None."""
+        config = RedisConfig(use_sentinel=True, sentinel_hosts=[("localhost", 26379)])
+        assert config.sentinel_password is None
+
+    def test_sentinel_password_configurable(self):
+        """sentinel_password should be independently configurable."""
+        config = RedisConfig(
+            use_sentinel=True,
+            sentinel_hosts=[("localhost", 26379)],
+            password="data_password",
+            sentinel_password="sentinel_secret",
+        )
+        assert config.password == "data_password"
+        assert config.sentinel_password == "sentinel_secret"
+
 
 class TestRedisConfigEdgeCases:
     """Test edge cases and boundary conditions."""
