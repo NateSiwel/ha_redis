@@ -44,6 +44,31 @@ from redis.exceptions import ConnectionError, TimeoutError, RedisError
 pytestmark = pytest.mark.integration
 
 
+async def wait_for_replication(
+    replica_client,
+    key: str,
+    expected_value: str,
+    timeout: float = 5.0,
+    interval: float = 0.2,
+) -> str:
+    """
+    Poll a replica until the expected value appears or timeout is reached.
+
+    Redis replication is asynchronous. A fixed sleep is a race condition —
+    especially after failovers or under Docker networking latency.  This
+    helper actively checks the replica, which is both faster on the happy
+    path and safer on the slow path.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    value = None
+    while asyncio.get_event_loop().time() < deadline:
+        value = await replica_client.get(key)
+        if value == expected_value:
+            return value
+        await asyncio.sleep(interval)
+    return value  # return last seen value so the assert gives a useful diff
+
+
 def get_test_redis_config() -> RedisConfig:
     """Get Redis configuration from environment variables."""
     return RedisConfig(
@@ -423,15 +448,14 @@ class TestSentinelDiscovery:
         master = sentinel_client.get_client()
         await master.set("replica_test_key", "replica_test_value")
         
-        # Wait for replication
-        await asyncio.sleep(0.5)
-        
         # Get replica client via abstraction
         replica_client = await sentinel_client.get_replica_client()
         assert replica_client is not None
         
-        # Should be able to read
-        value = await replica_client.get("replica_test_key")
+        # Poll replica until replication catches up
+        value = await wait_for_replication(
+            replica_client, "replica_test_key", "replica_test_value"
+        )
         assert value == "replica_test_value"
         
         # Cleanup
@@ -534,14 +558,15 @@ class TestSentinelDiscoveryRaw:
         master_client = raw_sentinel.master_for(master_name)
         await master_client.set("raw_replica_read_test", "replica_value")
         
-        await asyncio.sleep(0.5)
-        
         replica_client = raw_sentinel.slave_for(master_name)
         
         result = await replica_client.ping()
         assert result is True
         
-        value = await replica_client.get("raw_replica_read_test")
+        # Poll replica until replication catches up
+        value = await wait_for_replication(
+            replica_client, "raw_replica_read_test", "replica_value"
+        )
         assert value == "replica_value"
         
         await master_client.delete("raw_replica_read_test")
@@ -736,11 +761,10 @@ class TestReplicaReads:
             # Write to master
             await master_client.set(test_key, test_value)
             
-            # Wait for replication
-            await asyncio.sleep(0.5)
-            
-            # Read from replica
-            value = await replica_client.get(test_key)
+            # Poll replica until replication catches up
+            value = await wait_for_replication(
+                replica_client, test_key, test_value
+            )
             assert value == test_value
         finally:
             # Cleanup
@@ -761,8 +785,10 @@ class TestReplicaReads:
             for i in range(10):
                 await master_client.set(f"consistency_test_{i}", f"value_{i}")
             
-            # Wait for replication
-            await asyncio.sleep(0.5)
+            # Wait for the last key to replicate (implies all prior keys are there too)
+            await wait_for_replication(
+                replica_client, "consistency_test_9", "value_9"
+            )
             
             # Read all keys multiple times from replica
             for _ in range(3):
@@ -781,17 +807,23 @@ class TestReplicaReads:
         """Replica should reject write operations by default."""
         master_name = os.getenv("TEST_SENTINEL_MASTER_NAME", "mymaster")
         
+        # Verify a real replica is available; after a failover slave_for()
+        # may fall back to the master if no healthy replicas exist yet.
+        replicas = await raw_sentinel.discover_slaves(master_name)
+        if not replicas:
+            pytest.skip("No replicas available (topology may still be recovering from failover)")
+        
         replica_client = raw_sentinel.slave_for(master_name)
         
         try:
-            # Try to write to replica - should fail or be redirected
-            # Depending on Redis config, this may raise an error
+            # Confirm we are actually connected to a replica, not the master.
+            info = await replica_client.info("replication")
+            if info.get("role") != "slave":
+                pytest.skip("slave_for() returned the master (no real replica available)")
+            
+            # Try to write to replica - should fail with READONLY error
             with pytest.raises((RedisError, Exception)):
                 await replica_client.set("replica_write_test", "should_fail")
-        except Exception:
-            # Some configurations may allow writes or auto-redirect
-            # The test passes if any exception is raised
-            pass
         finally:
             await replica_client.close()
 
